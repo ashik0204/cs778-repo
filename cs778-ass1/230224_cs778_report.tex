@@ -1,0 +1,97 @@
+\documentclass[10pt]{article}
+\usepackage[a4paper,margin=0.7in]{geometry}
+\usepackage{graphicx,booktabs,amsmath,amssymb,microtype}
+\usepackage[hidelinks]{hyperref}
+\usepackage{titlesec}
+\titlespacing*{\section}{0pt}{6pt}{3pt}
+\setlength{\parskip}{3pt}
+\setlength{\parindent}{0pt}
+
+\begin{document}
+\begin{center}
+{\Large \textbf{Comparing Policy Gradient Methods on MuJoCo}}\\[2pt]
+CS778: Foundations of Modern AI \quad$\cdot$\quad Roll no.\ 230224
+\end{center}
+
+\section{Setup}
+VPG, TRPO and PPO (clip) were implemented from scratch in PyTorch and trained on \texttt{HalfCheetah-v4} and \texttt{Walker2d-v4} for 1M environment steps each, with 2 seeds per algorithm--environment pair (12 runs).
+To make the comparison fair, \textbf{everything except the policy update is shared}:
+\begin{itemize}\setlength\itemsep{0pt}
+\item a Gaussian actor (64-64 tanh MLP for the mean, state-independent $\log\sigma$) and a 64-64 tanh critic;
+\item running state normalization;
+\item GAE advantages ($\gamma=0.99$, $\lambda=0.95$) that bootstrap $V(S_{t+1})$ on time-limit truncation but not on true termination;
+\item batches of 2048 steps, and the same critic fit (80 Adam steps on the $\lambda$-return).
+\end{itemize}
+The three update rules are:
+\begin{itemize}\setlength\itemsep{0pt}
+\item \textbf{VPG:} one Adam step on $-\frac1N\sum_t \log\pi_\theta(A_t|S_t)\hat A_t$ (lr $3\!\times\!10^{-4}$).
+\item \textbf{TRPO:} a natural-gradient step $\sqrt{2\delta/g^\top v}\,v$ with $v\approx F^{-1}g$ from 10 conjugate-gradient iterations on Fisher-vector products, followed by a backtracking line search that requires $\bar D_{KL}\le\delta=0.01$ and surrogate improvement.
+\item \textbf{PPO:} the clipped surrogate ($\varepsilon=0.2$), optimized for up to 10 epochs of 64-sample minibatches, with approximate-KL early stopping.
+\end{itemize}
+Returns below are raw environment returns of the stochastic training policy.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\linewidth]{return_and_length.png}
+\vspace{-14pt}
+\caption{Episodic return (top) and episode length (bottom) vs.\ environment steps. Each line is the mean of 2 seeds (10-episode moving average) and the band is the min--max over seeds. HalfCheetah cannot terminate, so its length is always 1000.}
+\label{fig:main}
+\end{figure}
+
+\begin{table}[h]
+\centering\small
+\begin{tabular}{lrrrr|rrrr}
+\toprule
+& \multicolumn{4}{c|}{HalfCheetah-v4: return at step} & \multicolumn{4}{c}{Walker2d-v4: return at step} \\
+& 100k & 250k & 500k & 1M & 100k & 250k & 500k & 1M \\
+\midrule
+VPG  & $-128$ & 64   & 326  & 723  & 156 & 231  & 408  & 1202 \\
+TRPO & 367    & \textbf{2118} & \textbf{2954} & \textbf{3615} & 338 & 936  & \textbf{2169} & 2983 \\
+PPO  & \textbf{549} & 1471 & 1997 & 2761 & 334 & \textbf{1004} & 1829 & \textbf{3628} \\
+\bottomrule
+\end{tabular}
+\caption{Mean over 2 seeds of the smoothed return. Per-seed final returns: HalfCheetah VPG 593/853, TRPO 1614/5604, PPO 2483/3046; Walker2d VPG 1351/932, TRPO 3145/2972, PPO 3458/3910. Walker2d mean length of the last 10 episodes: VPG $\approx$430, TRPO $\approx$760, PPO $\approx$910.}
+\label{tab:res}
+\end{table}
+
+\section{Observations and explanations}
+
+\textbf{1. Trust-region methods are far more sample-efficient than VPG.}
+On both tasks, TRPO and PPO reach in 250k steps what VPG has not reached after 1M (Table~\ref{tab:res}).
+VPG uses each batch of 2048 samples for a \emph{single} gradient step.
+The step must stay small, because the policy-gradient estimate is only valid near $\theta_k$ and nothing prevents a large step from collapsing the policy.
+So each sample buys very little improvement.
+TRPO instead takes the \emph{largest} step the KL constraint allows.
+Because the step is measured in policy space (through the Fisher matrix), not parameter space, its size adapts automatically to the local geometry.
+PPO reuses the same batch for up to 320 minibatch updates, and clipping removes the incentive to push the probability ratio outside $[0.8,1.2]$, so reuse stays safe.
+Both methods therefore extract many times more improvement per sample.
+This is the practical meaning of treating policy gradient as local optimization of the surrogate $L_{\theta_k}(\theta)$ inside a trust region.
+
+\textbf{2. TRPO vs.\ PPO: comparable, with the ranking decided by seed variance.}
+On Walker2d the two track each other for most of training, and PPO is ahead at 1M (3628 vs.\ 2983).
+On HalfCheetah, TRPO has the higher mean, but its seeds differ by $\sim$4000.
+Watching the trained policies showed that \textbf{TRPO seed 0 flipped the cheetah onto its back} and learned to run upside down: it covers 97\,m per episode against 324\,m for seed 1.
+This is a well-known local optimum of HalfCheetah.
+A trust region limits \emph{how fast} the policy changes, not \emph{which} optimum it reaches.
+Once the policy commits to the flipped gait and its $\log\sigma$ shrinks, no small, KL-bounded step leads back to upright running.
+With 2 seeds, TRPO and PPO cannot be separated on HalfCheetah; a flip in one PPO seed would have reversed the ranking.
+PPO's seeds happened to stay closer (2483/3046).
+
+\textbf{3. On Walker2d, learning to balance dominates.}
+Walker2d gives $+1$ per step while healthy and terminates on a fall, so return and episode length rise together (Fig.~\ref{fig:main}, bottom right).
+At 1M steps, VPG walkers fall after $\sim$430 steps.
+TRPO and PPO survive $\sim$760 and $\sim$910 steps, and a third to a half of their final episodes reach the 1000-step limit.
+Walker2d curves are also much noisier than HalfCheetah's, because a single stumble ends an episode early and cuts its return.
+VPG's late jump in return (seed 0 near 550k, seed 1 near 800k steps) coincides with its episodes getting longer, i.e.\ it only then learned to stay upright.
+
+\textbf{4. Stability and cost.}
+TRPO's HalfCheetah curves rise almost monotonically, because the line search rejects any step that fails to improve the surrogate inside the KL ball.
+PPO's constraint is soft (clipping plus early stopping on an approximate KL), and its curves are slightly noisier.
+PPO is much simpler: it needs only first-order gradients, with no Fisher-vector products, conjugate gradient or line search, and it matched TRPO overall.
+This matches the lecture's summary: PPO recovers most of TRPO's benefit with first-order machinery.
+
+\textbf{Limitations.}
+Two seeds per configuration is enough to show the VPG vs.\ trust-region gap, but not to rank TRPO against PPO.
+Hyperparameters were the standard defaults and were not tuned per algorithm.
+In particular, VPG with a larger learning rate or a larger batch would likely learn faster, at the cost of more instability.
+\end{document}

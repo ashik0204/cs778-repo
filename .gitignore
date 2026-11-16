@@ -1,0 +1,12 @@
+# virtual environments
+.venv/
+**/.venv/
+__pycache__/
+.ipynb_checkpoints/
+
+# submission bundles (duplicates of files in the repo)
+*.zip
+cs778-ass1/230224_cs778_assignment/
+
+# course handout (instructor's material)
+CS778_assignment2_*.pdf
